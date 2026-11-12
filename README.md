@@ -67,7 +67,7 @@ The web page shrinks photos to 2576 px on the long side before upload. The comma
 ## Tips
 
 - On an RTX 3070 (8 GB) a page takes about 30–60 s with `qwen3-vl:8b-instruct`.
-- Include the page where the game starts. A continuation page can only be checked against the moves before it.
+- Only complete games are loaded: a game needs its first page (starting at move 1) and the page with its result. A game that runs onto a page you didn't photograph (like a new game starting at the bottom of the last page) is skipped, and the status line says why.
 - A commentary line that comes after the game's last move (e.g. why the opponent resigned) stays as comment text. PGN can't attach a variation after the final move.
 - Shoot the page flat and evenly lit. A local 8B model is more sensitive to blur and angle than cloud models.
 - Any problem still left is listed above the move list. Fix it in the PGN box and click **Apply edits**.

@@ -11,6 +11,7 @@ let gameIndex = 0;
 let parsed = null;     // { headers, root, result, error }
 let current = null;    // current node in the tree
 let orientation = "white";
+let busy = false;      // true while a job runs: all inputs are locked
 let nodeEls = new Map();
 
 // ---------- board (Chessground draws, chess.js in pgn.js handles the rules) ----------
@@ -38,6 +39,7 @@ document.addEventListener("paste", (e) => {
 });
 
 async function addImages(files) {
+  if (busy) return;    // no paste / drop while processing
   for (const file of [...files].filter((f) => f.type.startsWith("image/"))) {
     pages.push(await downscale(file));
   }
@@ -62,12 +64,12 @@ function renderThumbs() {
     const t = document.createElement("div");
     t.className = "thumb";
     const img = Object.assign(document.createElement("img"), { src: url, alt: `Page photo ${i + 1}` });
-    const rm = Object.assign(document.createElement("button"), { textContent: "×", title: "Remove" });
-    rm.addEventListener("click", () => { pages.splice(i, 1); renderThumbs(); });
+    const rm = Object.assign(document.createElement("button"), { textContent: "×", title: "Remove", disabled: busy });
+    rm.addEventListener("click", () => { if (!busy) { pages.splice(i, 1); renderThumbs(); } });
     t.append(img, rm);
     box.append(t);
   });
-  $("extract").disabled = !pages.length;
+  $("extract").disabled = busy || !pages.length;
   $("extract").textContent = pages.length > 1 ? `Extract PGN from ${pages.length} pages` : "Extract PGN";
 }
 
@@ -87,7 +89,10 @@ $("extract").addEventListener("click", async () => {
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
     const result = await pollJob(data.job);
     games = result.games || [];
-    if (!games.length) throw new Error("No chess game found on these pages.");
+    if (!games.length) {
+      const why = (result.skipped || []).map((s) => `• ${s.white} – ${s.black}: ${s.reason}`).join("\n");
+      throw new Error(why ? `No complete game on these pages.\n${why}` : "No chess game found on these pages.");
+    }
     setStatus((result.log || []).join("\n"));
     pages = [];          // finished: clear the photos from the page
     renderThumbs();
@@ -124,10 +129,12 @@ function showProgress(frac, msg, elapsedMs = 0) {
   $("progressTime").textContent = s ? `${Math.floor(s / 60)}:${String(s % 60).padStart(2, "0")}` : "";
 }
 
-function setBusy(busy) {
-  $("extract").disabled = busy || !pages.length;
-  $("file").disabled = busy;
-  drop.classList.toggle("disabled", busy);
+function setBusy(on) {
+  busy = on;
+  for (const id of ["file", "backend", "translate"]) $(id).disabled = on;
+  drop.classList.toggle("disabled", on);
+  $("thumbs").classList.toggle("disabled", on);
+  renderThumbs();      // re-renders the × buttons and the Extract button with the new state
 }
 
 function setStatus(msg, isError = false) {
@@ -183,16 +190,58 @@ function esc(s) {
   return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 }
 
+// Main line: a grid of (number | white | black) rows. Comments and variations
+// break the grid as full-width blocks; variations are rendered inline inside them.
 function renderMoves() {
   const box = $("moves");
   box.innerHTML = "";
   nodeEls = new Map();
-  const main = document.createElement("div");
-  main.className = "main";
-  if (parsed.root.comment) main.append(span("comment", parsed.root.comment));
-  if (parsed.root.children[0]) renderLine(parsed.root.children[0], main);
-  main.append(span("result", parsed.result));
-  box.append(main);
+  const grid = document.createElement("div");
+  grid.className = "movelist";
+  const block = (cls, text) => { const el = span(cls, text); grid.append(el); return el; };
+
+  if (parsed.root.comment) block("ml-comment", parsed.root.comment);
+  let node = parsed.root.children[0];
+  let openRow = false; // true after a white move, waiting for black's move in the same row
+  while (node) {
+    if (node.preComment) {
+      if (openRow) { block("ml-move ml-empty", "…"); openRow = false; }
+      block("ml-comment", node.preComment);
+    }
+    const white = isWhiteMove(node);
+    if (white || !openRow) {
+      block("ml-num", moveNumberLabel(node).replace(/\.+$/, ""));
+      if (!white) block("ml-move ml-empty", "…");
+    }
+    grid.append(moveEl(node, "ml-move"));
+    openRow = white;
+
+    const siblings = node.parent.children;
+    const alts = siblings[0] === node ? siblings.slice(1) : [];
+    if (node.comment || alts.length) {
+      if (openRow) { block("ml-move ml-empty", "…"); openRow = false; }
+      if (node.comment) block("ml-comment", node.comment);
+      for (const alt of alts) {
+        const v = block("ml-var", "");
+        renderLine(alt, v);
+      }
+    }
+    node = node.children[0];
+  }
+  if (openRow) block("ml-move ml-empty", "");
+  block("ml-result", parsed.result);
+  box.append(grid);
+}
+
+function moveEl(node, cls) {
+  const nags = node.nags.map((n) => NAG_TEXT[n] || `$${n}`).join("");
+  const el = span(cls, node.san + nags);
+  el.classList.add("mv");
+  if (diagramAt(node)) el.classList.add("has-diagram");
+  if (suggestionAt(node)) el.classList.add("suspect");
+  el.addEventListener("click", () => goTo(node));
+  nodeEls.set(node, el);
+  return el;
 }
 
 function span(cls, text) {
@@ -208,14 +257,7 @@ function renderLine(first, container) {
   while (node) {
     if (node.preComment) { container.append(span("comment", node.preComment)); needNumber = true; }
     if (isWhiteMove(node) || needNumber) container.append(span("num", moveNumberLabel(node)));
-    const nags = node.nags.map((n) => NAG_TEXT[n] || `$${n}`).join("");
-    const el = span("mv", node.san + nags);
-    if (diagramAt(node)) el.classList.add("has-diagram");
-    if (suggestionAt(node)) el.classList.add("suspect");
-    const target = node;
-    el.addEventListener("click", () => goTo(target));
-    nodeEls.set(node, el);
-    container.append(el, " ");
+    container.append(moveEl(node, "var-move"), " ");
     needNumber = false;
 
     if (node.comment) { container.append(span("comment", node.comment)); needNumber = true; }

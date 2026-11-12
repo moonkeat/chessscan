@@ -730,8 +730,39 @@ def extract(images: list[tuple[bytes, str]], translate: bool = False, backends: 
             _attach_diagram_checks(images, result)
         except Exception as e:  # noqa: BLE001 - the check is an extra; never lose the transcription over it
             result["log"].append(f"diagram check skipped: {e}")
+    _drop_incomplete_games(result)
     report(1.0, "Done")
     return result
+
+
+def _incomplete_reason(game: dict) -> str | None:
+    """Why a game can't be shown as a whole game, or None if it is complete."""
+    if (game["headers"].get("Result") or "*") not in ("1-0", "0-1", "1/2-1/2"):
+        return "no result on these pages - add the page(s) where it ends"
+    if not (game.get("fen") or "").strip():
+        first = _first_move_number(game.get("movetext", ""))
+        if first is not None and first != (1, False):
+            return "its first page is missing - it starts at a later move"
+    return None
+
+
+def _drop_incomplete_games(result: dict) -> None:
+    """Keep only complete games; list the others in result["skipped"].
+
+    Run after the diagram check, so a skipped game's diagrams are not
+    mistaken for positions of another game on the same pages.
+    """
+    keep, skipped = [], []
+    for g in result["games"]:
+        reason = _incomplete_reason(g)
+        if reason:
+            skipped.append({"white": g["headers"].get("White", "?"), "black": g["headers"].get("Black", "?"),
+                            "reason": reason})
+        else:
+            keep.append(g)
+    result["games"], result["skipped"] = keep, skipped
+    for s in skipped:
+        result["log"].append(f"skipped incomplete game {s['white']} - {s['black']}: {s['reason']}")
 
 
 def _extract_games(images, translate, backends, report) -> dict:
@@ -846,6 +877,8 @@ def main() -> None:
         sys.stdout.write(g["pgn"] + "\n")
         for e in g["errors"]:
             print(f"WARNING: {e}", file=sys.stderr)
+    if not result["games"]:
+        print("No complete game found on these pages.", file=sys.stderr)
     for g in result["games"]:
         for sug in g.get("suggestions", []):
             num = f"{sug['move_number']}{'.' if sug['white'] else '...'}"
