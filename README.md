@@ -45,13 +45,13 @@ $env:GEMINI_API_KEY="..."        # optional fallback
 .venv\Scripts\python server.py        # then open http://localhost:8000
 ```
 
-Drop, choose, or paste (Ctrl+V) one or more page photos, pick a model (default: Auto), then click **Extract PGN**. If the pages contain more than one game, pick the game from the dropdown above the board. Tick *Translate commentary to English* if you want the comments translated.
+Drop, choose, or paste (Ctrl+V) one or more page photos, pick a model (default: Auto), then click **Extract PGN**. If the pages contain more than one game, pick the game from the dropdown above the board. Comments are translated to English by default; untick *Translate commentary to English* to keep the book's language.
 Use ← / → / Home / End to step through the moves. Open `http://localhost:8000/#manual` to use the viewer on PGN you type or paste yourself.
 
 Command-line only:
 
 ```powershell
-.venv\Scripts\python extractor.py page1.jpg page2.jpg page3.jpg --translate --backends ollama,gemini > games.pgn
+.venv\Scripts\python extractor.py page1.jpg page2.jpg page3.jpg --backends ollama,gemini > games.pgn   # add --keep-language to skip translation
 ```
 
 The web page shrinks photos to 2576 px on the long side before upload. The command line sends the file as it is, so shrink large phone photos first to keep the local model fast.
@@ -86,5 +86,6 @@ About 60 tests, around 30 seconds, no model needed: recorded real model output i
 - A commentary line that comes after the game's last move (e.g. why the opponent resigned) stays as comment text. PGN can't attach a variation after the final move.
 - Shoot the page flat and evenly lit. A local 8B model is more sensitive to blur and angle than cloud models.
 - Fixing a wrong move: select it and click ✎ (or press E), then play the right move on the board. The rest of the game is re-checked. An auto-corrected move also offers its other candidates as one-click buttons.
+- A two-model setup is not worth it either: running GLM-OCR first and giving its text to Qwen3-VL got the same 75/75 moves and fully English comments, but took about 40% longer.
 - A lighter model is not worth it: `qwen3-vl:4b-instruct` runs about twice as fast but lost most of the sample game. To speed up the 8B model, close apps that use video memory (browsers, Steam, Teams) so more of it fits on the GPU.
 - Any problem still left is listed above the move list. Fix it in the PGN box and click **Apply edits**.

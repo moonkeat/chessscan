@@ -4,7 +4,7 @@
     python server.py --port 9000
 
 API
-  POST /api/extract   {"images": [data URL, ...], "translate": bool, "backends": "ollama,gemini"}
+  POST /api/extract   {"images": [data URL, ...], "translate": bool (default true), "backends": "ollama,gemini"}
                       -> {"job": id}
   GET  /api/jobs/<id> -> {"status": "running"|"done"|"error", "progress": 0..1, "message": str,
                           "result": {...} | "error": str}
@@ -118,7 +118,7 @@ class Handler(SimpleHTTPRequestHandler):
         with JOBS_LOCK:
             JOBS[job_id] = {"status": "running", "progress": 0.0,
                             "message": "Waiting for the previous job" if RUN_LOCK.locked() else "Starting"}
-        threading.Thread(target=_run_job, args=(job_id, images, bool(req.get("translate")), backends),
+        threading.Thread(target=_run_job, args=(job_id, images, bool(req.get("translate", True)), backends),
                          daemon=True).start()
         return self._json(202, {"job": job_id})
 

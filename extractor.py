@@ -20,7 +20,7 @@ Environment variables:
   GEMINI_MODEL       model id                      (default gemini-flash-latest)
 
 CLI usage:
-    python extractor.py page1.jpg [page2.jpg ...] [--translate] [--backends ollama,gemini] > games.pgn
+    python extractor.py page1.jpg [page2.jpg ...] [--keep-language] [--backends ollama,gemini] > games.pgn
 """
 
 from __future__ import annotations
@@ -91,7 +91,7 @@ continues_previous:
 
 headers:
 - Fill Event, Site, Date (YYYY.MM.DD, use ?? for unknown parts), Round, White, Black, ECO, Opening from the page.
-- Write names and events in English / Latin script (e.g. 卡尔森 -> "Carlsen, Magnus"; 2015年欧洲队际锦标赛第九轮 -> Event "European Team Championship 2015", Round "9"). Use "?" when unknown.
+- Headers only (never the comments): write names and events in English / Latin script (e.g. 卡尔森 -> "Carlsen, Magnus"; 2015年欧洲队际锦标赛第九轮 -> Event "European Team Championship 2015", Round "9"). Use "?" when unknown.
 - Result: "1-0", "0-1", "1/2-1/2", or "*" if the result is not shown on this page.
 
 fen:
@@ -110,12 +110,12 @@ Accuracy matters more than anything else: every move must be legal. Check moves 
 Use notes for anything uncertain (e.g. a move you could not read clearly) or an empty string."""
 
 # Repeating the key rules in the user turn noticeably helps small local models.
-FIRST_PROMPT = (
+_FIRST_PROMPT = (
     "Transcribe the chess game(s) on this page into PGN. Checklist:\n"
     "1. Main line: the bold moves, in order.\n"
     "2. Variations: every move sequence inside the commentary paragraphs (e.g. '7...Qd7 8.Ngf3 ...') "
     "goes in parentheses right after the main-line move it replaces.\n"
-    "3. Comments: each commentary paragraph goes in {braces} after the move it follows.\n"
+    "3. Comments: each commentary paragraph goes in {braces} after the move it follows. COMMENT_RULE\n"
     "4. Result: only if printed on the page, otherwise '*'.\n"
     "5. Page start: if the page starts in the middle of a game, set continues_previous=true and start "
     "the movetext where the page starts. If a new game starts on the page, add it as another entry.\n"
@@ -125,13 +125,18 @@ FIRST_PROMPT = (
 )
 
 
+_KEEP_LANGUAGE = ("Copy the commentary exactly as printed, in the book's own language (Chinese stays Chinese). "
+                  "Do NOT translate it.")
+_TRANSLATE = "Translate the commentary into concise, natural English."
+
+
 def system_prompt(translate: bool) -> str:
-    rule = (
-        "Translate the commentary into concise, natural English."
-        if translate
-        else "Keep the commentary in the book's original language, transcribed faithfully."
-    )
-    return SYSTEM_PROMPT.replace("COMMENT_LANGUAGE_RULE", rule)
+    return SYSTEM_PROMPT.replace("COMMENT_LANGUAGE_RULE", _TRANSLATE if translate else _KEEP_LANGUAGE)
+
+
+def first_prompt(translate: bool) -> str:
+    """The per-page request; repeats the comment-language rule where small models pay most attention."""
+    return _FIRST_PROMPT.replace("COMMENT_RULE", _TRANSLATE if translate else _KEEP_LANGUAGE)
 
 
 class BackendUnavailable(Exception):
@@ -358,6 +363,18 @@ TOP_TEXT_QUESTION = (
     "in it, in the original language. If there is no text above the title, return an empty string. "
     'Reply with JSON only: {"text": "..."}'
 )
+
+
+TOP_TEXT_QUESTION_EN = (
+    "Look only at the very top of this book page, ABOVE the title of the new game (the line with "
+    "the game number, event and players). Translate that text into concise English, keeping any "
+    "chess moves in it exactly as printed. If there is no text above the title, return an empty string. "
+    'Reply with JSON only: {"text": "..."}'
+)
+
+
+def top_text_question(translate: bool) -> str:
+    return TOP_TEXT_QUESTION_EN if translate else TOP_TEXT_QUESTION
 
 
 def _parse_text_answer(raw: str) -> str:
@@ -838,7 +855,8 @@ def _position_before(pages: list[dict]) -> str:
             f"{side}'s move {board.fullmove_number} from this position: {board.fen()}\n")
 
 
-def _run_backend(cls, system: str, images: list[tuple[bytes, str]], progress=None) -> dict:
+def _run_backend(cls, system: str, images: list[tuple[bytes, str]], progress=None,
+                 translate: bool = True) -> dict:
     report = progress or (lambda frac, msg: None)
     n = len(images)
     # Pass 1: transcribe every page in its own conversation.
@@ -847,7 +865,7 @@ def _run_backend(cls, system: str, images: list[tuple[bytes, str]], progress=Non
         report(idx / (n + 1), f"Reading page {idx + 1} of {n} ({cls.name})")
         backend = cls()
         pages.append({"index": idx, "backend": backend, "rounds": 0,
-                      "data": backend.start(system, img, mime, FIRST_PROMPT)})
+                      "data": backend.start(system, img, mime, first_prompt(translate))})
     pages, order_method = _order_pages(pages)
     calls = len(pages)
 
@@ -860,7 +878,7 @@ def _run_backend(cls, system: str, images: list[tuple[bytes, str]], progress=Non
         label = p["data"].get("page_number") or f"#{p['index'] + 1}"
         report(n / (n + 1), f"Reading the end of the previous game on page {label}")
         try:
-            p["top_text"] = p["backend"].ask_text(TOP_TEXT_QUESTION, top_fraction=0.4)
+            p["top_text"] = p["backend"].ask_text(top_text_question(translate), top_fraction=0.4)
             calls += 1
         except Exception:  # noqa: BLE001 - optional extra; the main transcription stands without it
             p["top_text"] = ""
@@ -901,7 +919,7 @@ def _model_label(name: str) -> str:
     return ""
 
 
-def extract(images: list[tuple[bytes, str]], translate: bool = False, backends: str | None = None,
+def extract(images: list[tuple[bytes, str]], translate: bool = True, backends: str | None = None,
             progress=None, check_diagrams: bool = True) -> dict:
     """Extract games from one or more page images given as (bytes, mime) pairs.
 
@@ -967,7 +985,7 @@ def _extract_games(images, translate, backends, report) -> dict:
             log.append(f"{name}: unknown backend")
             continue
         try:
-            result = _run_backend(cls, system, images, report)
+            result = _run_backend(cls, system, images, report, translate)
         except BackendUnavailable as e:
             log.append(f"{name}: skipped - {e}")
             continue
@@ -1054,7 +1072,8 @@ def _attach_diagram_checks(images: list[tuple[bytes, str]], result: dict) -> Non
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("images", nargs="+", help="page photos, in any order (sorted by printed page number)")
-    parser.add_argument("--translate", action="store_true", help="translate commentary into English")
+    parser.add_argument("--keep-language", action="store_true",
+                        help="keep the commentary in the book's language (default: translate to English)")
     parser.add_argument("--backends", help=f"backend order (default: {DEFAULT_BACKENDS})")
     args = parser.parse_args()
 
@@ -1062,7 +1081,7 @@ def main() -> None:
     for path in args.images:
         with open(path, "rb") as f:
             images.append((f.read(), mimetypes.guess_type(path)[0] or "image/jpeg"))
-    result = extract(images, args.translate, args.backends)
+    result = extract(images, not args.keep_language, args.backends)
 
     for g in result["games"]:
         sys.stdout.write(g["pgn"] + "\n")
