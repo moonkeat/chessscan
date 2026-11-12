@@ -260,18 +260,34 @@ def suggest_corrections(start, sans: list[str], readings: list[frozenset]) -> li
     last_ply = min(anchored[-1][0] + window, len(sans))
     for q in range(last_ply):  # the move that leads from ply q to ply q+1
         base = total_diff(boards, q)
-        best = None
+        candidates = []
         for alt in boards[q].legal_moves:
             alt_san = boards[q].san(alt)
             if alt_san == sans[q]:
                 continue
             trial = sans[:q] + [alt_san] + sans[q + 1:]
-            bs, legal = _replay(start, trial)
-            if not legal:
+            # cheap pass: replay from the changed move only as far as the diagrams reach
+            head = boards[q].copy()
+            head.push(alt)
+            bs = boards[:q + 1] + [head.copy()]  # copy: head keeps advancing below
+            ok = True
+            for san in trial[q + 1:last_ply]:
+                try:
+                    head.push_san(san)
+                except ValueError:
+                    ok = False
+                    break
+                bs.append(head.copy())
+            if not ok:
                 continue
             gain = base - total_diff(bs, q)
-            if gain >= 2 and (best is None or gain > best[0]):
+            if gain >= 2:
+                candidates.append((gain, alt_san, trial))
+        best = None
+        for gain, alt_san, trial in sorted(candidates, key=lambda c: -c[0]):
+            if _replay(start, trial)[1]:  # expensive pass: the rest of the game must stay legal
                 best = (gain, alt_san)
+                break
         if best:
             number = boards[q].fullmove_number
             white = boards[q].turn

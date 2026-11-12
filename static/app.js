@@ -87,17 +87,7 @@ $("extract").addEventListener("click", async () => {
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || `HTTP ${res.status}`);
-    const result = await pollJob(data.job);
-    games = result.games || [];
-    if (!games.length) {
-      const why = (result.skipped || []).map((s) => `• ${s.white} – ${s.black}: ${s.reason}`).join("\n");
-      throw new Error(why ? `No complete game on these pages.\n${why}` : "No chess game found on these pages.");
-    }
-    setStatus((result.log || []).join("\n"));
-    pages = [];          // finished: clear the photos from the page
-    renderThumbs();
-    setupGameSelect();
-    showGame(0, result.notes);
+    await finishJob(data.job);
   } catch (err) {
     setStatus(err.message, true);
   } finally {
@@ -105,6 +95,56 @@ $("extract").addEventListener("click", async () => {
     $("progress").hidden = true;
   }
 });
+
+// The job runs on the server, so a page that was reloaded or closed anyway can pick it up again.
+const JOB_KEY = "chessscan.job";
+
+async function finishJob(id) {
+  try { localStorage.setItem(JOB_KEY, id); } catch { /* storage unavailable: no resume */ }
+  try {
+    const result = await pollJob(id);
+    showResult(result);
+  } finally {
+    try { localStorage.removeItem(JOB_KEY); } catch { /* ignore */ }
+  }
+}
+
+function showResult(result) {
+  games = result.games || [];
+  if (!games.length) {
+    const why = (result.skipped || []).map((s) => `• ${s.white} – ${s.black}: ${s.reason}`).join("\n");
+    throw new Error(why ? `No complete game on these pages.\n${why}` : "No chess game found on these pages.");
+  }
+  setStatus((result.log || []).join("\n"));
+  pages = [];          // finished: clear the photos from the page
+  renderThumbs();
+  setupGameSelect();
+  showGame(0, result.notes);
+}
+
+// Ask before leaving (refresh, close, navigate away) while a job runs.
+window.addEventListener("beforeunload", (e) => {
+  if (!busy) return;
+  e.preventDefault();
+  e.returnValue = "";  // older browsers need a value to show the "Leave site?" dialog
+});
+
+// Resume a job that was still running when the page was reloaded or closed.
+(async function resumeJob() {
+  let id = null;
+  try { id = localStorage.getItem(JOB_KEY); } catch { return; }
+  if (!id) return;
+  setBusy(true);
+  showProgress(0, "Resuming the job that was running…");
+  try {
+    await finishJob(id);
+  } catch (err) {
+    setStatus(/Unknown job/.test(err.message) ? "" : err.message, !/Unknown job/.test(err.message));
+  } finally {
+    setBusy(false);
+    $("progress").hidden = true;
+  }
+})();
 
 async function pollJob(id) {
   const started = Date.now();
@@ -221,6 +261,10 @@ function renderMoves() {
     if (node.comment || alts.length) {
       if (openRow) { block("ml-move ml-empty", "…"); openRow = false; }
       if (node.comment) block("ml-comment", node.comment);
+      for (const line of node.commentLines || []) {   // playable line from the comment
+        const v = block("ml-var ml-line", "");
+        renderLine(line[0], v);
+      }
       for (const alt of alts) {
         const v = block("ml-var", "");
         renderLine(alt, v);
@@ -239,6 +283,7 @@ function moveEl(node, cls) {
   el.classList.add("mv");
   if (diagramAt(node)) el.classList.add("has-diagram");
   if (suggestionAt(node)) el.classList.add("suspect");
+  else if (correctionAt(node)) el.classList.add("corrected");
   el.addEventListener("click", () => goTo(node));
   nodeEls.set(node, el);
   return el;
@@ -309,23 +354,44 @@ function moveLabel(number, white, san) {
   return `${number}${white ? "." : "..."} ${san}`;
 }
 
+function correctionPly(c) {
+  return (c.move_number - 1) * 2 + (c.white ? 1 : 2);
+}
+
+function correctionAt(node) {
+  const ply = mainlinePly(node);
+  return ply < 0 ? null : (games[gameIndex]?.corrections || []).find((c) => correctionPly(c) === ply) || null;
+}
+
 function renderChecks() {
   const g = games[gameIndex];
   const box = $("checks");
   const diagrams = g?.diagrams || [];
   const suggestions = g?.suggestions || [];
+  const corrections = g?.corrections || [];
   box.innerHTML = "";
-  box.hidden = !diagrams.length;
-  if (!diagrams.length) return;
+  box.hidden = !diagrams.length && !corrections.length;
+  if (box.hidden) return;
 
   const head = document.createElement("div");
   head.className = "checks-head";
-  head.textContent = suggestions.length
-    ? `Book diagrams: ${diagrams.length} matched, ${suggestions.length} move(s) to check`
-    : `Book diagrams: ${diagrams.length} matched to moves, no conflicts found`;
+  const toCheck = suggestions.length + corrections.length;
+  head.textContent = diagrams.length
+    ? (toCheck ? `Book diagrams: ${diagrams.length} matched · ${toCheck} move(s) to check`
+      : `Book diagrams: ${diagrams.length} matched to moves, no conflicts found`)
+    : `${toCheck} move(s) to check`;
   box.append(head);
   box.classList.toggle("bad", suggestions.length > 0);
+  box.classList.toggle("warn", !suggestions.length && corrections.length > 0);
 
+  for (const c of corrections) {
+    const row = document.createElement("button");
+    row.className = "check-row corrected";
+    row.innerHTML = `Auto-corrected <b>${esc(moveLabel(c.move_number, c.white, c.read))}</b> → ` +
+      `<b>${esc(moveLabel(c.move_number, c.white, c.corrected))}</b> · please check against the book`;
+    row.addEventListener("click", () => goTo(nodeAtPly(correctionPly(c))));
+    box.append(row);
+  }
   for (const s of suggestions) {
     const row = document.createElement("button");
     row.className = "check-row suspect";
@@ -341,7 +407,7 @@ function renderChecks() {
     const chip = document.createElement("button");
     chip.className = "chip";
     chip.textContent = node.san ? moveLabel(...labelParts(node)) : "start";
-    chip.title = d.diff ? `${d.diff} square(s) read differently (often photo noise)` : "Exact match";
+    chip.title = "Show the book diagram at this move";
     chip.addEventListener("click", () => goTo(node));
     list.append(chip);
   }
@@ -374,12 +440,9 @@ function goTo(node) {
   if (d) {
     $("diagramImg").src = d.image;
     $("diagramImg").alt = "Diagram from the book at this move";
-    $("diagramInfo").textContent = d.diff
-      ? `Book diagram · ${d.diff} square(s) read differently (circled)`
-      : "Book diagram · matches this position";
-    cg.setAutoShapes(d.squares.map((sq) => ({ orig: sq, brush: "red" })));
-  } else {
-    cg.setAutoShapes([]);
+    // No per-square marks: a few misread squares per photo are normal reading noise.
+    // Real conflicts are reported as suspect moves (red) in the move list instead.
+    $("diagramInfo").textContent = "Book diagram at this move";
   }
 
   nodeEls.forEach((el) => el.classList.remove("active"));

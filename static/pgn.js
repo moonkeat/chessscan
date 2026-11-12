@@ -115,7 +115,60 @@ export function parsePgn(text) {
     atLineStart = false;
   }
   if (pendingPre && !root.children.length) root.comment = pendingPre;
+  if (!error) attachCommentLines(root);
   return { headers, root, result, error };
+}
+
+// A move sequence written inside a comment, e.g. "38...Qf7 39.Qd6+ Nc6 40.b×c6 b×c6".
+const SAN_RE = String.raw`(?:O-O-O|O-O|0-0-0|0-0|[KQRBN]?[a-h]?[1-8]?[x×:]?[a-h][1-8](?:=?[QRBN])?)[+#]?[!?]*`;
+const NUM_RE = String.raw`\d+\s*(?:\.\.\.|…|\.)\s*`;
+const LINE_RE = new RegExp(String.raw`(?<![\w.])(${NUM_RE})${SAN_RE}(?:\s+(?:${NUM_RE})?${SAN_RE})*`, "g");
+
+/**
+ * Make move sequences that remain inside comments playable.
+ *
+ * The server already turns commentary lines into real variations where PGN
+ * allows it. What is left is mostly a line after the game's final move (e.g.
+ * why the opponent resigned), which PGN cannot attach as a variation. Such a
+ * line is played from the commented position and stored in node.commentLines;
+ * its nodes are reachable by clicking but are not part of the main line.
+ */
+function attachCommentLines(root) {
+  const stack = [root];
+  while (stack.length) {
+    const node = stack.pop();
+    stack.push(...node.children);
+    if (!node.comment) continue;
+    for (const m of node.comment.matchAll(LINE_RE)) {
+      const line = playLine(node, m[0]);
+      if (line) (node.commentLines ||= []).push(line);
+    }
+  }
+}
+
+function playLine(from, text) {
+  const [, fullmove] = from.fen.split(" ").slice(4);
+  const first = text.match(/^(\d+)\s*(\.\.\.|…|\.)/);
+  const blackToMove = from.fen.split(" ")[1] === "b";
+  // the line must start right here: same move number and side to move
+  if (!first || Number(first[1]) !== Number(fullmove) || (first[2] !== ".") !== blackToMove) return null;
+  const nodes = [];
+  let cur = from;
+  for (const raw of text.split(/\s+/)) {
+    const tok = raw.replace(/^\d+(\.+|…)/, "");
+    if (!tok) continue;
+    const m = tok.match(/^(.*?)([!?]{1,2})?$/);
+    const game = new Chess(cur.fen);
+    let move;
+    try { move = game.move(m[1].replace(/×/g, "x").replace(/0-0-0/g, "O-O-O").replace(/0-0/g, "O-O")); } catch { move = null; }
+    if (!move) return null; // only fully legal lines become playable
+    const node = newNode(cur, game.fen(), move);
+    if (m[2] && SUFFIX_NAG[m[2]]) node.nags.push(SUFFIX_NAG[m[2]]);
+    if (nodes.length) nodes[nodes.length - 1].children.push(node);
+    nodes.push(node);
+    cur = node;
+  }
+  return nodes.length ? nodes : null;
 }
 
 /** "12." for white-to-move parents, "12..." for black. */

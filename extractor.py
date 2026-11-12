@@ -15,7 +15,7 @@ Environment variables:
   EXTRACT_BACKENDS   comma-separated order        (default "ollama,gemini")
   OLLAMA_HOST        Ollama server URL             (default http://localhost:11434)
   OLLAMA_MODEL       vision model tag              (default qwen3-vl:8b-instruct)
-  OLLAMA_NUM_CTX     context window                (default 8192)
+  OLLAMA_NUM_CTX     context window                (default 6144)
   GEMINI_API_KEY     key from https://aistudio.google.com/apikey
   GEMINI_MODEL       model id                      (default gemini-flash-latest)
 
@@ -118,7 +118,10 @@ FIRST_PROMPT = (
     "3. Comments: each commentary paragraph goes in {braces} after the move it follows.\n"
     "4. Result: only if printed on the page, otherwise '*'.\n"
     "5. Page start: if the page starts in the middle of a game, set continues_previous=true and start "
-    "the movetext where the page starts. If a new game starts on the page, add it as another entry."
+    "the movetext where the page starts. If a new game starts on the page, add it as another entry.\n"
+    "6. Text at the top of the page BEFORE a new game's title belongs to the previous game. Never drop it: "
+    "output it as the FIRST entry (continues_previous=true), even if it has no bold moves, e.g. "
+    "{\"continues_previous\": true, \"movetext\": \"{...the commentary text...} 1-0\"}."
 )
 
 
@@ -183,8 +186,9 @@ class OllamaBackend:
         self.host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
         # The instruct variant answers directly; "qwen3-vl:8b" is a thinking model (~10x slower).
         self.model = os.environ.get("OLLAMA_MODEL", "qwen3-vl:8b-instruct")
-        # 8192 fits an 8 GB GPU better than larger contexts and is enough for a page + 2 repairs.
-        self.num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "8192"))
+        # 6144 keeps most of the 8B model on an 8 GB GPU (about 3x faster than 8192). A page uses
+        # ~4.2k tokens and repairs are kept at a fixed size (see followup), so it is enough.
+        self.num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "6144"))
         self.messages: list = []
         self._check()
 
@@ -215,13 +219,65 @@ class OllamaBackend:
     def start(self, system: str, image: bytes, mime: str, text: str) -> dict:
         self.messages = [
             {"role": "system", "content": system},
-            {"role": "user", "content": text, "images": [base64.b64encode(image).decode("ascii")]},
+            {"role": "user", "content": text, "images": [base64.b64encode(_cap_pixels(image)).decode("ascii")]},
         ]
         return self._chat()
 
     def followup(self, text: str) -> dict:
-        self.messages.append({"role": "user", "content": text})
+        # Keep the conversation a fixed size: page + latest answer + new problem. Older rounds
+        # are dropped so repeated repairs can never push the image out of the context window.
+        self.messages = self.messages[:2] + [self.messages[-1], {"role": "user", "content": text}]
         return self._chat()
+
+    def ask_text(self, question: str, top_fraction: float = 1.0) -> str:
+        """A short side question about the same page; returns plain text.
+
+        `top_fraction` < 1 sends only the top part of the page (fewer image tokens: faster).
+        """
+        image = self.messages[1]["images"][0]
+        if top_fraction < 1.0:
+            image = base64.b64encode(_crop_top(base64.b64decode(image), top_fraction)).decode("ascii")
+        resp = _post_json(f"{self.host}/api/chat", {
+            "model": self.model,
+            "messages": [{"role": "user", "content": question, "images": [image]}],
+            "format": TEXT_SCHEMA,
+            "stream": False,
+            "keep_alive": "10m",
+            "options": {"temperature": 0, "num_ctx": self.num_ctx},
+        }, timeout=600)
+        return _parse_text_answer(resp["message"]["content"])
+
+
+MAX_PIXELS = 1536 * 2048  # ~3.1 MP: a page photo at this size reads well and fits the 6144 context
+
+
+def _cap_pixels(image: bytes) -> bytes:
+    """Downscale very large photos so the image tokens fit the local model's context."""
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return image
+    img = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+    if img is None or img.shape[0] * img.shape[1] <= MAX_PIXELS:
+        return image
+    scale = (MAX_PIXELS / (img.shape[0] * img.shape[1])) ** 0.5
+    img = cv2.resize(img, (int(img.shape[1] * scale), int(img.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+    ok, jpg = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return jpg.tobytes() if ok else image
+
+
+def _crop_top(image: bytes, fraction: float) -> bytes:
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return image
+    img = cv2.imdecode(np.frombuffer(image, np.uint8), cv2.IMREAD_COLOR)
+    if img is None:
+        return image
+    ok, jpg = cv2.imencode(".jpg", img[: max(1, int(img.shape[0] * fraction))], [cv2.IMWRITE_JPEG_QUALITY, 92])
+    return jpg.tobytes() if ok else image
 
 
 class GeminiBackend:
@@ -274,8 +330,42 @@ class GeminiBackend:
         self.contents.append({"role": "user", "parts": [{"text": text}]})
         return self._generate()
 
+    def ask_text(self, question: str, top_fraction: float = 1.0) -> str:
+        """A short side question about the same page; returns plain text."""
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        image_part = self.contents[0]["parts"][0]
+        resp = _post_json(url, {
+            "contents": [{"role": "user", "parts": [image_part, {"text": question}]}],
+            "generationConfig": {"temperature": 0, "responseMimeType": "application/json",
+                                 "responseJsonSchema": TEXT_SCHEMA},
+        }, headers={"x-goog-api-key": self.key}, timeout=300)
+        parts = ((resp.get("candidates") or [{}])[0].get("content") or {}).get("parts", [])
+        return _parse_text_answer("".join(p.get("text", "") for p in parts if not p.get("thought")))
+
 
 BACKENDS = {"ollama": OllamaBackend, "gemini": GeminiBackend}
+
+TEXT_SCHEMA = {
+    "type": "object",
+    "properties": {"text": {"type": "string"}},
+    "required": ["text"],
+    "additionalProperties": False,
+}
+
+TOP_TEXT_QUESTION = (
+    "Look only at the very top of this book page, ABOVE the title of the new game (the line with "
+    "the game number, event and players). Transcribe that text exactly, including any chess moves "
+    "in it, in the original language. If there is no text above the title, return an empty string. "
+    'Reply with JSON only: {"text": "..."}'
+)
+
+
+def _parse_text_answer(raw: str) -> str:
+    try:
+        text = json.loads(raw[raw.find("{"):raw.rfind("}") + 1]).get("text", "")
+    except (ValueError, AttributeError):
+        return ""
+    return " ".join(str(text).replace("{", "(").replace("}", ")").split())
 
 
 # --------------------------------------------------------------------- validation
@@ -468,13 +558,85 @@ def _auto_fix(game: dict) -> dict | None:
     return None
 
 
+_ILLEGAL_RE = re.compile(r"illegal san: '([^']+)' in (\S+ [wb] \S+ \S+ \d+ \d+)")
+
+
+def _edit_distance(a: str, b: str) -> int:
+    prev = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        cur = [i]
+        for j, cb in enumerate(b, 1):
+            cur.append(min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (ca != cb)))
+        prev = cur
+    return prev[-1]
+
+
+def _legal_plies(pgn: str) -> tuple[int, int]:
+    """(number of problems, -legal main-line moves) for ranking repairs; lower is better."""
+    game = chess.pgn.read_game(io.StringIO(pgn))
+    if game is None:
+        return (99, 0)
+    return (len(game.errors), -sum(1 for _ in game.mainline_moves()))
+
+
+def _fuzzy_fix(game: dict, problems: list[str], max_fixes: int = 5) -> dict | None:
+    """Repair misread moves (e.g. 'Rf1' for 'Rfe1', 'Nb4' for 'Nh4') without asking the model.
+
+    For the first illegal move, the candidates are the legal moves in that position whose
+    notation is one edit away from what was read. Each is tried with the rest of the game
+    and the one that keeps the most moves legal is applied - but only if it is the single
+    clear best. Repeats for the next illegal move. Returns None if nothing was repaired.
+
+    Legality cannot always tell the truth apart (two misreads can combine into a legal but
+    wrong line), so every repair is recorded in game["corrections"] and shown to the user.
+    """
+    current, changed = game, False
+    corrections = list(game.get("corrections", []))
+    strip = lambda s: re.sub(r"[+#x!?]", "", s)  # noqa: E731
+    for _ in range(max_fixes):
+        m = next((_ILLEGAL_RE.search(p) for p in problems if _ILLEGAL_RE.search(p)), None)
+        if not m:
+            break
+        bad, board = m.group(1), chess.Board(m.group(2))
+        candidates = [board.san(mv) for mv in board.legal_moves
+                      if _edit_distance(strip(board.san(mv)), strip(bad)) <= 1]
+        parts = re.split(r"(\{[^}]*\})", normalize_movetext(current["movetext"]))  # never edit comments
+        token = re.compile(rf"(?<![\w]){re.escape(bad)}(?![\w])")
+        scored = []
+        for cand in candidates:
+            for pi, part in enumerate(parts):
+                if part.startswith("{"):
+                    continue
+                for occ in token.finditer(part):
+                    new_part = part[:occ.start()] + cand + part[occ.end():]
+                    trial = {**current, "movetext": "".join(parts[:pi] + [new_part] + parts[pi + 1:])}
+                    scored.append((_legal_plies(build_pgn(trial)), cand, trial))
+        if not scored:
+            break
+        best = min(s[0] for s in scored)
+        winners = {cand for score, cand, _ in scored if score == best}
+        if len(winners) != 1 or best >= _legal_plies(build_pgn(current)):
+            break                                   # ambiguous or no better: leave it to the model
+        winner = next(iter(winners))
+        current = next(t for score, cand, t in scored if score == best and cand == winner)
+        changed = True
+        corrections.append({"move_number": board.fullmove_number, "white": board.turn == chess.WHITE,
+                            "read": bad, "corrected": winner})
+        problems = validate_pgn(build_pgn(current))
+        if not problems:
+            break
+    return {**current, "corrections": corrections} if changed else None
+
+
 def _evaluate(data: dict) -> tuple[list, list]:
     games, problems = [], []
     for i, g in enumerate(data["games"]):
         pgn = build_pgn(g)
         errs = validate_pgn(pgn)
-        if errs and (fixed := _auto_fix(g)):
-            g, pgn, errs = fixed, build_pgn(fixed), []
+        if errs and (fixed := _auto_fix(g) or _fuzzy_fix(g, errs)):
+            g = fixed
+            pgn = build_pgn(g)
+            errs = validate_pgn(pgn)
         elif errs and _unmatched_parens(normalize_movetext(g["movetext"])):
             errs.append("Unbalanced parentheses: every '(' must close with ')'. Use parentheses only "
                         "for variations, never for diagram references.")
@@ -631,6 +793,13 @@ def _stitch(pages: list[dict]) -> dict:
         data = p["data"]
         if data.get("notes"):
             notes.append(f"p.{data.get('page_number') or p['index'] + 1}: {data['notes']}")
+        top = p.get("top_text")
+        if top and games and data["games"] and not _is_continuation(data["games"][0]):
+            # commentary above a new game's title closes the previous game: add it before its result
+            prev = games[-1]
+            tail = _RESULT_TAIL_RE.search(prev["movetext"])
+            result = tail.group(0).strip() if tail else ""
+            prev["movetext"] = f"{_RESULT_TAIL_RE.sub('', prev['movetext'])} {{{top}}} {result}".strip()
         for j, g in enumerate(data["games"]):
             if j == 0 and _is_continuation(g) and games:
                 prev = games[-1]
@@ -677,6 +846,20 @@ def _run_backend(cls, system: str, images: list[tuple[bytes, str]], progress=Non
                       "data": backend.start(system, img, mime, FIRST_PROMPT)})
     pages, order_method = _order_pages(pages)
     calls = len(pages)
+
+    # Small models often skip commentary printed above a new game's title (the end of the
+    # previous game). Ask for it directly on every later page that starts a new game.
+    for k, p in enumerate(pages):
+        games = p["data"]["games"]
+        if k == 0 or not games or _is_continuation(games[0]):
+            continue
+        label = p["data"].get("page_number") or f"#{p['index'] + 1}"
+        report(n / (n + 1), f"Reading the end of the previous game on page {label}")
+        try:
+            p["top_text"] = p["backend"].ask_text(TOP_TEXT_QUESTION, top_fraction=0.4)
+            calls += 1
+        except Exception:  # noqa: BLE001 - optional extra; the main transcription stands without it
+            p["top_text"] = ""
 
     # Pass 2: validate page by page; send problems back to the page that introduced them.
     prev_problems: set[str] = set()
@@ -731,6 +914,10 @@ def extract(images: list[tuple[bytes, str]], translate: bool = False, backends: 
         except Exception as e:  # noqa: BLE001 - the check is an extra; never lose the transcription over it
             result["log"].append(f"diagram check skipped: {e}")
     _drop_incomplete_games(result)
+    for g in result["games"]:
+        for c in g.get("corrections", []):
+            num = f"{c['move_number']}{'.' if c['white'] else '...'}"
+            result["log"].append(f"auto-corrected misread move {num} {c['read']} -> {c['corrected']} (please check)")
     report(1.0, "Done")
     return result
 

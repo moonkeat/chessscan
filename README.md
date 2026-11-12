@@ -25,7 +25,7 @@ Settings (environment variables):
 | `EXTRACT_BACKENDS` | `ollama,gemini` |
 | `OLLAMA_MODEL` | `qwen3-vl:8b-instruct` (use the instruct variant: plain `qwen3-vl:8b` is a thinking model, about 10x slower) |
 | `OLLAMA_HOST` | `http://localhost:11434` |
-| `OLLAMA_NUM_CTX` | `8192` (fits an 8 GB GPU better) |
+| `OLLAMA_NUM_CTX` | `6144` (keeps most of the model on an 8 GB GPU: about 3x faster than 8192) |
 | `GEMINI_MODEL` | `gemini-flash-latest` |
 
 Note: on Gemini's free tier, Google may use the images you send to improve its products.
@@ -56,6 +56,21 @@ Command-line only:
 
 The web page shrinks photos to 2576 px on the long side before upload. The command line sends the file as it is, so shrink large phone photos first to keep the local model fast.
 
+## Tests
+
+```powershell
+.venv\Scripts\pip install -r requirements-dev.txt
+.venv\Scripts\python -m pytest tests -q
+```
+
+About 60 tests, around 30 seconds, no model needed: recorded real model output is replayed from `tests/fixtures/`.
+
+- `test_pgn_cleanup.py`: notation clean-up, PGN assembly, repairs, commentary lines → variations
+- `test_pages.py`: page ordering (every upload order), stitching, move-number repair, misread-move repair, skipping incomplete games
+- `test_diagrams.py`: diagram anchoring; legal-but-wrong moves caught with no false alarms
+- `test_server.py`: job API, progress, error handling
+- `test_ui.py`: the real page in headless Edge: board, progress, input locking, leave warning, resume, corrections, diagrams (skipped without Playwright)
+
 ## Files
 
 - `extractor.py`: backends (Ollama / Gemini), PGN assembly, python-chess check, retry loop and fallback
@@ -66,7 +81,7 @@ The web page shrinks photos to 2576 px on the long side before upload. The comma
 
 ## Tips
 
-- On an RTX 3070 (8 GB) a page takes about 30–60 s with `qwen3-vl:8b-instruct`.
+- On an RTX 3070 (8 GB) a page takes about 25–30 s with `qwen3-vl:8b-instruct` (four pages plus checks: about 2 minutes).
 - Only complete games are loaded: a game needs its first page (starting at move 1) and the page with its result. A game that runs onto a page you didn't photograph (like a new game starting at the bottom of the last page) is skipped, and the status line says why.
 - A commentary line that comes after the game's last move (e.g. why the opponent resigned) stays as comment text. PGN can't attach a variation after the final move.
 - Shoot the page flat and evenly lit. A local 8B model is more sensitive to blur and angle than cloud models.

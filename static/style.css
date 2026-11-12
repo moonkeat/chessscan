@@ -162,6 +162,8 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
   font-size: 14px; color: var(--muted); border-top: 1px solid var(--border);
   border-left: 3px solid var(--border); background: var(--bg);
 }
+.movelist > .ml-line { border-left-style: dashed; border-left-color: var(--comment); }
+.movelist > .ml-line::before { content: "Line from the comment: "; font-size: 12px; color: var(--comment); margin-right: 4px; }
 .movelist > .ml-result {
   grid-column: 1 / -1; padding: 8px 12px; text-align: center; font-weight: 700;
   border-top: 1px solid var(--border);
@@ -186,6 +188,9 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 .checks { padding: 10px 12px; border-radius: 8px; background: var(--ok-bg); color: var(--ok-text);
   display: flex; flex-direction: column; gap: 8px; }
 .checks.bad { background: var(--err-bg); color: var(--err-text); }
+.checks.warn { background: var(--warn-bg); color: var(--warn-text); }
+.mv.corrected { background: var(--warn-bg); color: var(--warn-text); }
+.mv.corrected.active { background: var(--warn-text); color: var(--panel); }
 .checks-head { font-weight: 600; }
 .check-row { text-align: left; background: transparent; border-color: currentColor; color: inherit; }
 .check-chips { display: flex; flex-wrap: wrap; gap: 6px; }
