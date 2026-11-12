@@ -171,6 +171,45 @@ function playLine(from, text) {
   return nodes.length ? nodes : null;
 }
 
+/**
+ * Write a parsed game back to PGN text (headers, comments, NAGs, variations).
+ *
+ * Used after the user edits a move: each node's stored SAN is written as is, so
+ * the moves after an edit are re-checked when the text is parsed again.
+ * Playable comment lines (node.commentLines) are not written: they live in the comment.
+ */
+export function toPgn({ headers, root, result }) {
+  const head = Object.entries(headers).map(([k, v]) => `[${k} "${String(v).replace(/\\/g, "\\\\").replace(/"/g, '\\"')}"]`);
+  const parts = [];
+  const comment = (text) => { if (text) parts.push(`{${text.replace(/[{}]/g, "")}}`); };
+  comment(root.comment);
+
+  function writeLine(first) {
+    let node = first;
+    let needNumber = true;
+    while (node) {
+      if (node.preComment) { comment(node.preComment); needNumber = true; }
+      if (isWhiteMove(node) || needNumber) parts.push(moveNumberLabel(node));
+      parts.push(node.san + node.nags.map((n) => ` $${n}`).join(""));
+      needNumber = false;
+      if (node.comment) { comment(node.comment); needNumber = true; }
+      const siblings = node.parent.children;
+      if (siblings[0] === node && siblings.length > 1) {
+        for (const alt of siblings.slice(1)) {
+          parts.push("(");
+          writeLine(alt);
+          parts.push(")");
+        }
+        needNumber = true;
+      }
+      node = node.children[0];
+    }
+  }
+  if (root.children[0]) writeLine(root.children[0]);
+  parts.push(result || "*");
+  return `${head.join("\n")}\n\n${parts.join(" ").replace(/\( /g, "(").replace(/ \)/g, ")")}\n`;
+}
+
 /** "12." for white-to-move parents, "12..." for black. */
 export function moveNumberLabel(node) {
   const [, side, , , , full] = node.parent.fen.split(" ");

@@ -193,6 +193,15 @@ button.primary { background: var(--accent); color: var(--accent-text); border-co
 .mv.corrected.active { background: var(--warn-text); color: var(--panel); }
 .checks-head { font-weight: 600; }
 .check-row { text-align: left; background: transparent; border-color: currentColor; color: inherit; }
+.check-row.corrected { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px;
+  border: 1px solid currentColor; border-radius: 8px; }
+.check-link { text-align: left; background: transparent; border: 0; padding: 0; color: inherit; }
+.fix-options { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 13px; }
+.chip.alt { border-color: currentColor; font-weight: 600; }
+.edit-bar { display: flex; gap: 10px; align-items: center; justify-content: space-between; max-width: 520px;
+  margin-top: 10px; padding: 8px 12px; border-radius: 8px; background: var(--warn-bg); color: var(--warn-text);
+  font-size: 14px; }
+.board.editing { outline: 3px solid var(--diagram); outline-offset: 2px; }
 .check-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip { padding: 2px 10px; border-radius: 999px; font-size: 13px; background: transparent; color: inherit;
   border-color: var(--diagram); }

@@ -23,5 +23,5 @@ Run the test suite and make sure it passes before reporting the change as done:
 - Correct moves matter most. Player names / header metadata errors are acceptable.
 - Never let a guess pass silently: automatic move corrections go into `game["corrections"]` and are
   shown in the UI for the user to check.
-- The local model (`qwen3-vl:8b-instruct` via Ollama, 6144 context) is the default; Gemini free tier
+- The local model (`qwen3-vl:8b-instruct` via Ollama, 4608 context, photos capped at 1200x1600) is the default; Gemini free tier
   is the fallback. No paid APIs.

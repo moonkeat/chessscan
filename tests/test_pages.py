@@ -85,7 +85,9 @@ def test_reported_rf1_misread_is_repaired_without_the_model(replay, model_pages)
     result = replay(with_misread(model_pages, "p004", "17. Rfe1", "17. Rf1"))
     game = result["games"][0]
     assert game["errors"] == [] and mainline(game["pgn"]) == book_mainline()
-    assert game["corrections"] == [{"move_number": 17, "white": True, "read": "Rf1", "corrected": "Rfe1"}]
+    (c,) = game["corrections"]
+    assert (c["move_number"], c["white"], c["read"], c["corrected"]) == (17, True, "Rf1", "Rfe1")
+    assert set(c["alternatives"]) == {"Rfb1", "Rfc1", "Rfd1"}  # offered to the user if the guess is wrong
     assert replay.backend.followups == []                       # fixed in code, no model retry
     assert any("auto-corrected misread move 17. Rf1 -> Rfe1" in line for line in result["log"])
 

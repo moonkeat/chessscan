@@ -25,7 +25,7 @@ Settings (environment variables):
 | `EXTRACT_BACKENDS` | `ollama,gemini` |
 | `OLLAMA_MODEL` | `qwen3-vl:8b-instruct` (use the instruct variant: plain `qwen3-vl:8b` is a thinking model, about 10x slower) |
 | `OLLAMA_HOST` | `http://localhost:11434` |
-| `OLLAMA_NUM_CTX` | `6144` (keeps most of the model on an 8 GB GPU: about 3x faster than 8192) |
+| `OLLAMA_NUM_CTX` | `4608` (keeps most of the model on an 8 GB GPU; photos are shrunk to about 1200×1600 for the local model to fit) |
 | `GEMINI_MODEL` | `gemini-flash-latest` |
 
 Note: on Gemini's free tier, Google may use the images you send to improve its products.
@@ -81,8 +81,10 @@ About 60 tests, around 30 seconds, no model needed: recorded real model output i
 
 ## Tips
 
-- On an RTX 3070 (8 GB) a page takes about 25–30 s with `qwen3-vl:8b-instruct` (four pages plus checks: about 2 minutes).
+- On an RTX 3070 (8 GB) a page takes about 20 s with `qwen3-vl:8b-instruct` (four pages plus checks: about 1.5 minutes).
 - Only complete games are loaded: a game needs its first page (starting at move 1) and the page with its result. A game that runs onto a page you didn't photograph (like a new game starting at the bottom of the last page) is skipped, and the status line says why.
 - A commentary line that comes after the game's last move (e.g. why the opponent resigned) stays as comment text. PGN can't attach a variation after the final move.
 - Shoot the page flat and evenly lit. A local 8B model is more sensitive to blur and angle than cloud models.
+- Fixing a wrong move: select it and click ✎ (or press E), then play the right move on the board. The rest of the game is re-checked. An auto-corrected move also offers its other candidates as one-click buttons.
+- A lighter model is not worth it: `qwen3-vl:4b-instruct` runs about twice as fast but lost most of the sample game. To speed up the 8B model, close apps that use video memory (browsers, Steam, Teams) so more of it fits on the GPU.
 - Any problem still left is listed above the move list. Fix it in the PGN box and click **Apply edits**.

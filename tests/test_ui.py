@@ -54,7 +54,8 @@ def result(model_pages):
     res = extractor.extract([(b"", "image/jpeg")] * 4, backends="replay", check_diagrams=False)
     res["games"][0]["diagrams"] = [{"image": PHOTO, "ply": 7, "diff": 0, "squares": []}]
     res["games"][0]["suggestions"] = []
-    res["games"][0]["corrections"] = [{"move_number": 17, "white": True, "read": "Rf1", "corrected": "Rfe1"}]
+    res["games"][0]["corrections"] = [{"move_number": 17, "white": True, "read": "Rf1", "corrected": "Rfe1",
+                                       "alternatives": ["Rfc1", "Rfd1"]}]
     return res
 
 
@@ -108,7 +109,7 @@ def test_full_flow(browser, base_url, result):
     assert page.locator(".movelist > .ml-var").count() >= 4
     # an automatic correction is shown for the user to check, and jumps to the move
     assert "Auto-corrected 17. Rf1 → 17. Rfe1" in page.inner_text(".check-row.corrected")
-    page.click(".check-row.corrected")
+    page.click(".check-link")
     assert page.inner_text(".mv.active") == "Rfe1"
     assert page.locator(".mv.corrected").count() == 1
     # the book diagram appears at its move (after 4.c3, ply 7), and only there
@@ -154,5 +155,57 @@ def test_reload_resumes_the_running_job(browser, base_url, result):
     page.reload()
     page.wait_for_selector("#viewer:not([hidden])", timeout=15000)
     assert page.evaluate("localStorage.getItem('chessscan.job')") is None
+    assert page.errors == []
+    page.close()
+
+
+DONE = lambda result: [{"status": "done", "progress": 1, "message": "Done", "result": result}]  # noqa: E731
+
+
+def load_game(browser, base_url, result):
+    page = open_page(browser, base_url, DONE(json.loads(json.dumps(result))))
+    add_photo(page)
+    page.click("#extract")
+    page.wait_for_selector("#viewer:not([hidden])", timeout=15000)
+    return page
+
+
+def test_wrong_auto_correction_can_be_swapped_for_an_alternative(browser, base_url, result):
+    page = load_game(browser, base_url, result)
+    page.click(".chip.alt >> text=Rfd1")
+    assert page.inner_text(".mv.active") == "Rfd1"
+    assert page.locator(".check-row.corrected").count() == 0      # the user decided: warning gone
+    assert "17. Rfd1" in page.input_value("#pgn") and "Rfe1" not in page.input_value("#pgn")
+    assert "Qd1" in page.inner_text("#warnings")                   # 18.Qd1 no longer fits: flagged, not hidden
+    assert page.errors == []
+    page.close()
+
+
+def test_alternative_that_breaks_later_moves_is_flagged(browser, base_url, result):
+    page = load_game(browser, base_url, result)
+    page.click(".chip.alt >> text=Rfc1")                           # then 20.Rc1 is impossible
+    assert "Illegal or unreadable move" in page.inner_text("#warnings")
+    assert page.inner_text(".mv.active") == "Rfc1"
+    page.close()
+
+
+def test_any_move_can_be_replaced_on_the_board(browser, base_url, result):
+    page = load_game(browser, base_url, result)
+    page.locator('.movelist > .ml-move:text-is("a4")').click()     # 16. a4
+    assert page.inner_text(".mv.active") == "a4"
+    page.click("#editMove")
+    assert page.is_visible("#editBar") and "16. a4" in page.inner_text("#editBar")
+    box = page.locator("cg-board").bounding_box()
+    sq = box["width"] / 8
+    center = lambda f, r: (box["x"] + (f + .5) * sq, box["y"] + (7 - r + .5) * sq)  # noqa: E731
+    page.mouse.click(*center(0, 1))                                # a2
+    page.mouse.click(*center(0, 2))                                # a3
+    page.wait_for_function("document.querySelector('.mv.active')?.textContent === 'a3'")
+    assert page.is_hidden("#editBar")
+    assert "16. a3" in page.input_value("#pgn")
+    # Esc leaves edit mode without changing anything
+    page.click("#editMove")
+    page.keyboard.press("Escape")
+    assert page.is_hidden("#editBar") and page.inner_text(".mv.active") == "a3"
     assert page.errors == []
     page.close()

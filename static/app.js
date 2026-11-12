@@ -1,5 +1,6 @@
 import { Chessground } from "https://cdn.jsdelivr.net/npm/chessground@9.1.1/dist/chessground.js";
-import { parsePgn, moveNumberLabel, isWhiteMove, NAG_TEXT } from "./pgn.js";
+import { Chess } from "https://cdn.jsdelivr.net/npm/chess.js@1.0.0/+esm";
+import { parsePgn, toPgn, moveNumberLabel, isWhiteMove, NAG_TEXT } from "./pgn.js";
 
 const $ = (id) => document.getElementById(id);
 const MAX_SIDE = 2576; // downscale big phone photos before upload
@@ -15,8 +16,11 @@ let busy = false;      // true while a job runs: all inputs are locked
 let nodeEls = new Map();
 
 // ---------- board (Chessground draws, chess.js in pgn.js handles the rules) ----------
+// Not viewOnly: Chessground binds its mouse handlers only at start-up, and edit mode needs them.
+// Outside edit mode no piece is movable (movable.color is undefined).
 const cg = Chessground($("board"), {
-  viewOnly: true,
+  movable: { free: false, color: undefined },
+  premovable: { enabled: false },
   coordinates: true,
   animation: { enabled: true, duration: 180 },
   highlight: { lastMove: true, check: true },
@@ -385,12 +389,29 @@ function renderChecks() {
   box.classList.toggle("warn", !suggestions.length && corrections.length > 0);
 
   for (const c of corrections) {
+    const wrap = document.createElement("div");
+    wrap.className = "check-row corrected";
     const row = document.createElement("button");
-    row.className = "check-row corrected";
+    row.className = "check-link";
     row.innerHTML = `Auto-corrected <b>${esc(moveLabel(c.move_number, c.white, c.read))}</b> → ` +
       `<b>${esc(moveLabel(c.move_number, c.white, c.corrected))}</b> · please check against the book`;
     row.addEventListener("click", () => goTo(nodeAtPly(correctionPly(c))));
-    box.append(row);
+    wrap.append(row);
+    const fixes = document.createElement("div");
+    fixes.className = "fix-options";
+    fixes.append("Wrong? Use ");
+    for (const alt of c.alternatives || []) {
+      const b = Object.assign(document.createElement("button"), { className: "chip alt", textContent: alt,
+        title: `Replace ${c.corrected} with ${alt}` });
+      b.addEventListener("click", () => replaceMove(nodeAtPly(correctionPly(c)), alt));
+      fixes.append(b, " ");
+    }
+    const onBoard = Object.assign(document.createElement("button"), { className: "chip alt",
+      textContent: "set on board…", title: "Play the right move on the board" });
+    onBoard.addEventListener("click", () => startEdit(nodeAtPly(correctionPly(c))));
+    fixes.append(onBoard);
+    wrap.append(fixes);
+    box.append(wrap);
   }
   for (const s of suggestions) {
     const row = document.createElement("button");
@@ -419,9 +440,94 @@ function labelParts(node) {
   return [Number(full), side === "w", node.san];
 }
 
+// ---------- editing a move ----------
+// Fix a wrong move (an auto-correction or any misread): replace its SAN, then
+// re-check everything after it by writing the PGN out and parsing it again.
+let editing = null;   // the node being replaced while the board is in edit mode
+
+function pathOf(node) {
+  const path = [];
+  for (let n = node; n.parent; n = n.parent) {
+    const i = n.parent.children.indexOf(n);
+    if (i < 0) return null;            // a playable comment line: not part of the game tree
+    path.unshift(i);
+  }
+  return path;
+}
+
+function nodeAtPath(path) {
+  let n = parsed.root;
+  for (const i of path || []) {
+    if (!n.children[i]) break;         // the edit made a later move illegal: stop at the last good one
+    n = n.children[i];
+  }
+  return n;
+}
+
+function replaceMove(node, san) {
+  if (!node?.parent) return;
+  const path = pathOf(node);
+  if (!path) return;
+  const ply = mainlinePly(node);
+  node.san = san;
+  node.nags = [];
+  const g = games[gameIndex];
+  if (ply >= 0 && g) {                  // the user has decided this move: drop its warnings
+    g.corrections = (g.corrections || []).filter((c) => correctionPly(c) !== ply);
+    g.suggestions = (g.suggestions || []).filter((s) => s.ply !== ply);
+  }
+  const text = toPgn(parsed);
+  $("pgn").value = text;
+  if (g) g.pgn = text;
+  stopEdit(false);
+  renderPgn(text);
+  goTo(nodeAtPath(path));
+}
+
+function startEdit(node = current) {
+  if (!node?.parent || !pathOf(node)) {
+    setStatus("Select a move in the list first, then click ✎ to replace it.");
+    return;
+  }
+  editing = node;
+  const before = new Chess(node.parent.fen);
+  const dests = new Map();
+  for (const m of before.moves({ verbose: true })) {
+    if (!dests.has(m.from)) dests.set(m.from, []);
+    dests.get(m.from).push(m.to);
+  }
+  const color = before.turn() === "w" ? "white" : "black";
+  cg.setAutoShapes([]);
+  cg.set({
+    fen: node.parent.fen, turnColor: color, lastMove: undefined, check: before.inCheck() ? color : false,
+    movable: { free: false, color, dests, showDests: true,
+      events: { after: (from, to) => {
+        const m = new Chess(node.parent.fen).move({ from, to, promotion: "q" });
+        if (m) replaceMove(editing, m.san);
+      } } },
+  });
+  $("editTarget").textContent = moveLabel(...labelParts(node));
+  $("editBar").hidden = false;
+  $("board").classList.add("editing");
+}
+
+function stopEdit(redraw = true) {
+  if (!editing) return;
+  const node = editing;
+  editing = null;
+  cg.set({ movable: { color: undefined, dests: new Map() } });
+  $("editBar").hidden = true;
+  $("board").classList.remove("editing");
+  if (redraw) goTo(node);
+}
+
+$("editMove").addEventListener("click", () => (editing ? stopEdit() : startEdit()));
+$("editCancel").addEventListener("click", () => stopEdit());
+
 // ---------- navigation ----------
 function goTo(node) {
   if (!node) return;
+  if (editing) stopEdit(false);
   current = node;
   const fen = node.fen;
   const turn = fen.split(" ")[1] === "w" ? "white" : "black";
@@ -460,6 +566,8 @@ function nav(action) {
 document.querySelectorAll("[data-nav]").forEach((b) => b.addEventListener("click", () => nav(b.dataset.nav)));
 document.addEventListener("keydown", (e) => {
   if (e.target.tagName === "TEXTAREA" || e.target.tagName === "INPUT" || $("viewer").hidden) return;
+  if (e.key === "Escape" && editing) { stopEdit(); return; }
+  if ((e.key === "e" || e.key === "E") && !e.ctrlKey && !e.metaKey) { editing ? stopEdit() : startEdit(); return; }
   const map = { ArrowLeft: "prev", ArrowRight: "next", Home: "start", End: "end" };
   if (map[e.key]) { e.preventDefault(); nav(map[e.key]); }
 });

@@ -15,7 +15,7 @@ Environment variables:
   EXTRACT_BACKENDS   comma-separated order        (default "ollama,gemini")
   OLLAMA_HOST        Ollama server URL             (default http://localhost:11434)
   OLLAMA_MODEL       vision model tag              (default qwen3-vl:8b-instruct)
-  OLLAMA_NUM_CTX     context window                (default 6144)
+  OLLAMA_NUM_CTX     context window                (default 4608)
   GEMINI_API_KEY     key from https://aistudio.google.com/apikey
   GEMINI_MODEL       model id                      (default gemini-flash-latest)
 
@@ -186,9 +186,9 @@ class OllamaBackend:
         self.host = os.environ.get("OLLAMA_HOST", "http://localhost:11434").rstrip("/")
         # The instruct variant answers directly; "qwen3-vl:8b" is a thinking model (~10x slower).
         self.model = os.environ.get("OLLAMA_MODEL", "qwen3-vl:8b-instruct")
-        # 6144 keeps most of the 8B model on an 8 GB GPU (about 3x faster than 8192). A page uses
-        # ~4.2k tokens and repairs are kept at a fixed size (see followup), so it is enough.
-        self.num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "6144"))
+        # A small context keeps more of the 8B model on an 8 GB GPU. A page capped at MAX_PIXELS
+        # uses ~3k tokens and repairs are kept at a fixed size (see followup), so 4608 is enough.
+        self.num_ctx = int(os.environ.get("OLLAMA_NUM_CTX", "4608"))
         self.messages: list = []
         self._check()
 
@@ -248,7 +248,7 @@ class OllamaBackend:
         return _parse_text_answer(resp["message"]["content"])
 
 
-MAX_PIXELS = 1536 * 2048  # ~3.1 MP: a page photo at this size reads well and fits the 6144 context
+MAX_PIXELS = 1200 * 1600  # ~1.9 MP: a page photo at this size still reads well and fits the 4608 context
 
 
 def _cap_pixels(image: bytes) -> bytes:
@@ -620,8 +620,12 @@ def _fuzzy_fix(game: dict, problems: list[str], max_fixes: int = 5) -> dict | No
         winner = next(iter(winners))
         current = next(t for score, cand, t in scored if score == best and cand == winner)
         changed = True
+        others = []  # the other candidates, best first, offered to the user as one-click fixes
+        for score, cand, _ in sorted(scored, key=lambda s: s[0]):
+            if cand != winner and cand not in others:
+                others.append(cand)
         corrections.append({"move_number": board.fullmove_number, "white": board.turn == chess.WHITE,
-                            "read": bad, "corrected": winner})
+                            "read": bad, "corrected": winner, "alternatives": others[:4]})
         problems = validate_pgn(build_pgn(current))
         if not problems:
             break
